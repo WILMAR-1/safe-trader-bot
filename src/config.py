@@ -43,6 +43,22 @@ class Config:
     MAX_OPEN_TRADES = int(os.getenv("MAX_OPEN_TRADES", "3"))
     TIMEFRAME = os.getenv("TIMEFRAME", "5m")
 
+    # Estrategia: safe (original, multi-indicador) | trend (seguimiento de tendencia)
+    STRATEGY = os.getenv("STRATEGY", "safe").lower()
+    # Velas a pedir al exchange. EMA200 + indicadores consumen ~200, hacen falta de sobra.
+    OHLCV_LIMIT = int(os.getenv("OHLCV_LIMIT", "500"))
+
+    # Parametros de TrendStrategy (ver src/trend_strategy.py)
+    TREND_ENTRY_N = int(os.getenv("TREND_ENTRY_N", "55"))
+    TREND_EXIT_N = int(os.getenv("TREND_EXIT_N", "20"))
+    TREND_MOMENTUM_N = int(os.getenv("TREND_MOMENTUM_N", "90"))
+    TREND_STOP_ATR = float(os.getenv("TREND_STOP_ATR", "2.0"))
+    TREND_TRAIL_ATR = float(os.getenv("TREND_TRAIL_ATR", "3.0"))
+
+    # Protecciones estilo Freqtrade (solo estrategia trend)
+    COOLDOWN_MINUTES = int(os.getenv("COOLDOWN_MINUTES", "60"))
+    STOPLOSS_GUARD_COUNT = int(os.getenv("STOPLOSS_GUARD_COUNT", "3"))
+
     # Pares a operar
     PAIR_WHITELIST = os.getenv(
         "PAIR_WHITELIST", "BTC/USDT,ETH/USDT,SOL/USDT,BNB/USDT,XRP/USDT"
@@ -83,6 +99,8 @@ class Config:
             errors.append("EXCHANGE_API_SECRET requerida para modo live")
         if cls.STAKE_AMOUNT <= 0:
             errors.append("STAKE_AMOUNT debe ser mayor a 0")
+        if cls.STRATEGY not in ("safe", "trend"):
+            errors.append("STRATEGY debe ser 'safe' o 'trend'")
         if cls.MAX_OPEN_TRADES < 1:
             errors.append("MAX_OPEN_TRADES debe ser al menos 1")
         if errors:

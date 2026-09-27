@@ -32,6 +32,10 @@ _TF_NAMES = {
 }
 
 
+# Identifica en MT5 las ordenes abiertas por este bot (las manuales no se tocan)
+BOT_MAGIC = 20260731
+
+
 class ExnessExchange:
     """Conexion a Exness a traves de MetaTrader 5, con reglas de apalancamiento."""
 
@@ -266,6 +270,7 @@ class ExnessExchange:
             "current_price": p.price_current, "stop_loss": p.sl,
             "take_profit": p.tp, "profit": p.profit,
             "time": datetime.fromtimestamp(p.time).isoformat(),
+            "magic": getattr(p, "magic", 0),
         } for p in positions]
 
     # ------------------------------------------------------------------
@@ -369,7 +374,7 @@ class ExnessExchange:
             "sl": float(stop_loss_price),          # stop loss SIEMPRE
             "tp": float(take_profit_price) if take_profit_price else 0.0,
             "deviation": 20,
-            "magic": 20260731,
+            "magic": BOT_MAGIC,
             "comment": "SafeTraderBot",
             "type_time": self.mt5.ORDER_TIME_GTC,
             "type_filling": self.mt5.ORDER_FILLING_IOC,
@@ -406,7 +411,7 @@ class ExnessExchange:
             "position": ticket,
             "price": tick.bid if is_buy else tick.ask,
             "deviation": 20,
-            "magic": 20260731,
+            "magic": BOT_MAGIC,
             "comment": "SafeTraderBot close",
             "type_time": self.mt5.ORDER_TIME_GTC,
             "type_filling": self.mt5.ORDER_FILLING_IOC,

@@ -7,11 +7,13 @@ import time
 import signal
 import logging
 import pandas as pd
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from src.config import Config
 from src.exchange import Exchange
 from src.indicators import add_all_indicators
 from src.strategy import SafeStrategy
+from src.trend_strategy import TrendParams, TrendStrategy
+from src.protections import Protections
 from src.risk_manager import RiskManager
 from src.database import Database
 from src.telegram_bot import TelegramCommander
@@ -48,7 +50,18 @@ class TradingBot:
         else:
             self.exchange = Exchange()
 
-        self.strategy = SafeStrategy()
+        self.use_trend = Config.STRATEGY == "trend"
+        if self.use_trend:
+            self.strategy = TrendStrategy(TrendParams(
+                entry_n=Config.TREND_ENTRY_N, exit_n=Config.TREND_EXIT_N,
+                momentum_n=Config.TREND_MOMENTUM_N, stop_atr=Config.TREND_STOP_ATR,
+                trail_atr=Config.TREND_TRAIL_ATR))
+            self.protections = Protections(cooldown_minutes=Config.COOLDOWN_MINUTES,
+                                           stoploss_guard_count=Config.STOPLOSS_GUARD_COUNT)
+        else:
+            self.strategy = SafeStrategy()
+            self.protections = None
+        logger.info("Estrategia activa: %s", Config.STRATEGY)
         self.db = Database(Config.DB_PATH)
 
         # Telegram Commander (notificaciones + comandos remotos)
@@ -327,6 +340,9 @@ class TradingBot:
                     f"Margin level {summary.get('margin_level')}% - riesgo de liquidacion"
                 )
 
+        if self.use_trend:
+            self._manage_exness_positions()
+
         positions = self.exness.get_positions()
         open_symbols = {p["symbol"] for p in positions}
 
@@ -338,15 +354,24 @@ class TradingBot:
             if len(positions) >= Config.MAX_OPEN_TRADES:
                 break
             try:
-                df = self.exness.fetch_ohlcv(symbol, Config.TIMEFRAME, limit=250)
+                if self.protections:
+                    ok, why = self.protections.can_enter(symbol)
+                    if not ok:
+                        logger.debug(why)
+                        continue
+                df = self.exness.fetch_ohlcv(symbol, Config.TIMEFRAME, limit=Config.OHLCV_LIMIT)
                 if df is None or df.empty or len(df) < 200:
                     continue
+                df = self._closed_candles(df)
                 df = add_all_indicators(df)
+                if self.use_trend:
+                    df = self.strategy.prepare(df)
                 df.dropna(inplace=True)
                 if len(df) < 2:
                     continue
 
-                signal = self._exness_signal(df)
+                signal = (self.strategy.signal(df, allow_short=True) if self.use_trend
+                          else self._exness_signal(df))
                 if not signal:
                     continue
 
@@ -355,8 +380,13 @@ class TradingBot:
                 if atr <= 0:
                     continue
 
+                if self.use_trend:
+                    # Stop OBLIGATORIO a stop_atr x ATR y sin TP: la salida la gestiona
+                    # el trailing chandelier (_manage_exness_positions)
+                    sl = self.strategy.initial_stop(price, atr, signal)
+                    tp = 0.0
                 # Stop loss OBLIGATORIO a 1.5 ATR
-                if signal == "buy":
+                elif signal == "buy":
                     sl = price - 1.5 * atr
                     tp = price + 3.0 * atr   # ratio 1:2
                 else:
@@ -383,9 +413,95 @@ class TradingBot:
                     positions = self.exness.get_positions()
                 else:
                     logger.info("Sin orden en %s: %s", symbol, result.get("reason"))
+                    self._notify_rejection(symbol, signal, result.get("reason", "?"))
 
             except Exception as e:
                 logger.error("Error analizando %s: %s", symbol, e)
+
+    def _manage_exness_positions(self):
+        """Trailing chandelier y salida por canal para posiciones Exness (estrategia trend).
+        El stop inicial vive en MT5; aqui se cierra por mercado cuando el trailing lo pide."""
+        from src.exness import BOT_MAGIC
+        for pos in self.exness.get_positions():
+            if pos.get("magic") != BOT_MAGIC:
+                continue  # posicion manual: no es nuestra
+            try:
+                df = self.exness.fetch_ohlcv(pos["symbol"], Config.TIMEFRAME, limit=Config.OHLCV_LIMIT)
+                if df is None or df.empty:
+                    continue
+                df = self.strategy.prepare(add_all_indicators(self._closed_candles(df)))
+                df.dropna(subset=["atr"], inplace=True)
+                exit_now, reason = self.strategy.check_exit(
+                    df, pos["entry_price"], self._to_utc_naive(pos["time"]),
+                    side=pos["side"], price=pos["current_price"])
+                if not exit_now:
+                    continue
+                result = self.exness.close_position(pos["ticket"])
+                if result.get("ok"):
+                    is_stop = reason.startswith("STOP")
+                    self.protections.register_exit(pos["symbol"], is_stop)
+                    self.notifier.send(f"*CIERRE {pos['symbol']}*\nRazon: `{reason}`\n"
+                                       f"P/L: `{pos.get('profit', 0):.2f}`")
+                    logger.info("Cerrada %s (%s)", pos["symbol"], reason)
+            except Exception as e:
+                logger.error("Error gestionando posicion %s: %s", pos.get("symbol"), e)
+
+    def _notify_rejection(self, symbol: str, side: str, reason: str):
+        """Avisar por Telegram de una senal rechazada por riesgo (max. 1 aviso/6h por simbolo).
+        Antes solo quedaba en el log y parecia que el bot no hacia nada."""
+        last = getattr(self, "_rejection_notified", {})
+        self._rejection_notified = last
+        now = datetime.now()
+        if symbol in last and now - last[symbol] < timedelta(hours=6):
+            return
+        last[symbol] = now
+        self.notifier.send(f"*Senal {side.upper()} {symbol} RECHAZADA por riesgo*\n`{reason}`\n"
+                           f"Usa /diagnostico para ver que simbolos puede operar tu cuenta.")
+
+    def diagnose_exness(self, symbols: list | None = None) -> list[dict]:
+        """Para cada simbolo: si la cuenta PUEDE operarlo con las reglas de riesgo actuales
+        (con un stop tipico de la estrategia activa) y si hay senal ahora mismo."""
+        out = []
+        if not (self.is_exness and getattr(self, "exness_ready", False)):
+            return [{"symbol": "-", "allowed": False, "reason": "Exness no conectado"}]
+        for symbol in symbols or Config.EXNESS_SYMBOLS:
+            row = {"symbol": symbol}
+            try:
+                df = self.exness.fetch_ohlcv(symbol, Config.TIMEFRAME, limit=Config.OHLCV_LIMIT)
+                if df is None or df.empty:
+                    out.append({**row, "allowed": False, "reason": "sin velas (¿nombre del simbolo?)"})
+                    continue
+                df = add_all_indicators(self._closed_candles(df))
+                if self.use_trend:
+                    df = self.strategy.prepare(df)
+                    row["signal"] = self.strategy.signal(df, allow_short=True) or "-"
+                else:
+                    row["signal"] = self._exness_signal(df.dropna()) or "-"
+                atr = float(df.iloc[-1]["atr"])
+                price = float(self.exness.fetch_ticker(symbol).get("ask") or df.iloc[-1]["close"])
+                mult = self.strategy.p.stop_atr if self.use_trend else 1.5
+                plan = self.exness.plan_order(symbol, "buy", price - mult * atr)
+                row.update(allowed=bool(plan.get("allowed")), reason=plan.get("reason", ""),
+                           lots=plan.get("lots"), risk_usd=plan.get("risk_usd"),
+                           leverage=plan.get("effective_leverage"))
+            except Exception as e:
+                row.update(allowed=False, reason=f"{type(e).__name__}: {e}")
+            out.append(row)
+        return out
+
+    @staticmethod
+    def _closed_candles(df: pd.DataFrame) -> pd.DataFrame:
+        """Quitar la ultima vela: sigue abierta y sus valores cambian hasta el cierre
+        (operar con ella es la causa clasica de backtests que no se replican en vivo)."""
+        return df.iloc[:-1].reset_index(drop=True) if len(df) > 1 else df
+
+    @staticmethod
+    def _to_utc_naive(t) -> pd.Timestamp:
+        """Hora local ISO (como la guarda la DB/MT5) -> UTC sin zona, como las velas."""
+        dt = datetime.fromisoformat(str(t))
+        if dt.tzinfo is None:
+            dt = dt.astimezone()  # interpretar como hora local
+        return pd.Timestamp(dt.astimezone(timezone.utc).replace(tzinfo=None))
 
     def _exness_signal(self, df: pd.DataFrame) -> str:
         """
@@ -416,6 +532,12 @@ class TradingBot:
                 if any(t["symbol"] == symbol for t in open_trades):
                     continue
 
+                if self.protections:
+                    ok, why = self.protections.can_enter(symbol)
+                    if not ok:
+                        logger.debug(why)
+                        continue
+
                 # Verificar riesgo
                 stake = self.risk_manager.get_position_size(Config.STAKE_AMOUNT)
                 can_trade, reason = self.risk_manager.can_open_trade(stake)
@@ -425,11 +547,21 @@ class TradingBot:
 
                 # Obtener datos y calcular indicadores
                 df = self._get_dataframe(symbol)
-                if df is None or len(df) < 200:
+                if df is None or len(df) < (self.strategy.min_candles if self.use_trend else 200):
                     continue
 
                 # Evaluar estrategia
                 if self.strategy.should_buy(df):
+                    if self.use_trend:
+                        # Tamano por volatilidad: el stop inicial cuesta RISK_PER_TRADE_PCT
+                        # del balance; STAKE_AMOUNT (ya ajustado por el RiskManager) es el tope
+                        last = df.iloc[-1]
+                        stake = self.strategy.position_size(
+                            self.risk_manager.current_balance, float(last["close"]),
+                            float(last["atr"]), Config.RISK_PER_TRADE_PCT, stake)
+                        if stake <= 0:
+                            logger.info("%s: posicion por riesgo por debajo del minimo, se omite", symbol)
+                            continue
                     self._execute_buy(symbol, stake, df)
 
             except Exception as e:
@@ -446,6 +578,18 @@ class TradingBot:
                 current_price = ticker["last"]
                 entry_price = trade["entry_price"]
                 current_profit = (current_price - entry_price) / entry_price
+
+                if self.use_trend:
+                    # Seguimiento de tendencia: sin timeouts ni take profit, deja correr
+                    df = self._get_dataframe(symbol, dropna=False)
+                    if df is None or df.empty:
+                        continue
+                    should_sell, reason = self.strategy.check_exit(
+                        df, entry_price, self._to_utc_naive(trade["entry_time"]),
+                        price=current_price)
+                    if should_sell:
+                        self._execute_sell(trade, current_price, reason)
+                    continue
 
                 # Timeout: cerrar si lleva mas de 48h
                 entry_time = datetime.fromisoformat(trade["entry_time"])
@@ -494,7 +638,7 @@ class TradingBot:
                 entry_price=order["price"],
                 amount=order["amount"],
                 stake_amount=stake,
-                entry_reason="safe_strategy",
+                entry_reason=f"{Config.STRATEGY}_strategy",
                 order_id=order.get("id", ""),
             )
 
@@ -528,6 +672,8 @@ class TradingBot:
             )
 
             self.risk_manager.register_trade_close(profit)
+            if self.protections:
+                self.protections.register_exit(trade["symbol"], reason.startswith("STOP"))
             self.notifier.notify_trade_close(
                 trade["symbol"], order["price"], profit, profit_pct, reason
             )
@@ -545,14 +691,21 @@ class TradingBot:
         except Exception as e:
             logger.error("Error ejecutando venta de %s: %s", trade["symbol"], e)
 
-    def _get_dataframe(self, symbol: str) -> pd.DataFrame:
-        """Obtener datos OHLCV y calcular indicadores."""
+    def _get_dataframe(self, symbol: str, dropna: bool = True) -> pd.DataFrame:
+        """Obtener velas CERRADAS y calcular indicadores.
+        Con limit=250 la EMA200 dejaba ~50 velas tras dropna y el filtro de 200 velas
+        impedia cualquier entrada; por eso se piden OHLCV_LIMIT (500) velas."""
         try:
-            ohlcv = self.exchange.fetch_ohlcv(symbol, Config.TIMEFRAME, limit=250)
+            ohlcv = self.exchange.fetch_ohlcv(symbol, Config.TIMEFRAME, limit=Config.OHLCV_LIMIT)
             df = pd.DataFrame(ohlcv, columns=["timestamp", "open", "high", "low", "close", "volume"])
             df["timestamp"] = pd.to_datetime(df["timestamp"], unit="ms")
-            df = add_all_indicators(df)
-            df.dropna(inplace=True)
+            df = add_all_indicators(self._closed_candles(df))
+            if self.use_trend:
+                df = self.strategy.prepare(df)
+            if dropna:
+                df.dropna(inplace=True)
+            else:
+                df.dropna(subset=["atr"], inplace=True)
             return df
         except Exception as e:
             logger.error("Error obteniendo datos de %s: %s", symbol, e)

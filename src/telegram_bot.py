@@ -10,6 +10,7 @@ Comandos disponibles:
   /prices     - Precios actuales de todos los pares
   /profit     - Resumen de ganancias
   /risk       - Estado del gestor de riesgo
+  /diagnostico - Que simbolos puede operar tu cuenta y por que no
   /pause      - Pausar el bot
   /resume     - Reanudar el bot
   /stop       - Detener el bot completamente
@@ -141,6 +142,7 @@ class TelegramCommander:
             "/prices": self._cmd_prices,
             "/profit": self._cmd_profit,
             "/risk": self._cmd_risk,
+            "/diagnostico": self._cmd_diagnostico,
             "/pause": self._cmd_pause,
             "/resume": self._cmd_resume,
             "/stop": self._cmd_stop,
@@ -363,6 +365,27 @@ class TelegramCommander:
             f"  Max perdidas diarias: `{rm.max_daily_losses}`"
         )
 
+    def _cmd_diagnostico(self):
+        """/diagnostico [SIMBOLO ...] - Explica simbolo a simbolo si la cuenta puede operar."""
+        if not self.bot_instance:
+            self.send("Bot no iniciado.")
+            return
+        if not Config.is_exness():
+            self.send("El diagnostico es para Exness. En Binance usa /risk.")
+            return
+        symbols = list(self._args) or None  # sin upper(): los simbolos cent acaban en "c"
+        lines = [f"*Diagnostico* (estrategia `{Config.STRATEGY}`, {Config.TIMEFRAME})\n"]
+        for r in self.bot_instance.diagnose_exness(symbols):
+            if r.get("allowed"):
+                lines.append(f"OK `{r['symbol']}`: {r['lots']} lotes, riesgo {r['risk_usd']}$, "
+                             f"{r['leverage']}x | senal: `{r.get('signal', '-')}`")
+            else:
+                lines.append(f"NO `{r['symbol']}`: {r.get('reason', '')}")
+        lines.append("\nSi todos salen NO, tu saldo no alcanza el lote minimo con el riesgo "
+                     "configurado. Prueba simbolos con lote pequeno (p.ej. `/diagnostico EURUSDc XAUUSDc`) "
+                     "y anadelos con /addpair.")
+        self.send("\n".join(lines))
+
     def _cmd_pause(self):
         if not self.bot_instance:
             self.send("Bot no iniciado.")
@@ -571,6 +594,7 @@ class TelegramCommander:
             "/prices - Precios actuales\n"
             "/profit - Resumen de ganancias por par\n"
             "/risk - Estado del gestor de riesgo\n"
+            "/diagnostico - Por que no opera (simbolo a simbolo)\n"
             "/config - Ver configuracion\n"
             "/ml - Estado del Machine Learning\n\n"
             "*Control:*\n"

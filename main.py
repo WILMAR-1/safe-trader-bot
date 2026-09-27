@@ -136,6 +136,7 @@ def cmd_download():
     # Descargar tambien en 1h y 4h para analisis
     print("\n  Descargando timeframes adicionales para analisis...")
     dl.download_all(pairs=Config.PAIR_WHITELIST, timeframe="1h", days=days)
+    dl.download_all(pairs=Config.PAIR_WHITELIST, timeframe="4h", days=days)
     dl.download_all(pairs=Config.PAIR_WHITELIST, timeframe="1d", days=days)
 
 

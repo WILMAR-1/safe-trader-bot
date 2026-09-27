@@ -45,6 +45,16 @@ python test_cent.py        # normalización de cuentas cent
 
 ---
 
+### ¿Por qué el bot no abre operaciones en Exness?
+
+Casi siempre es el tamaño de la cuenta. Con 15 USD, arriesgar un 1% son 0,15 USD por operación, y el **lote mínimo (0,01)** de BTCUSD, ETHUSD o XAUUSD ya pierde más que eso al tocar el stop: el bot rechaza la orden en vez de arriesgar de más. Ahora:
+
+- Cada señal rechazada llega por Telegram con el motivo (como mucho un aviso cada 6 h por símbolo).
+- `/diagnostico` (o `/diagnostico EURUSDc XAUUSDc`) indica, símbolo por símbolo, si tu cuenta puede operarlo, con cuántos lotes y qué riesgo.
+- Con saldos pequeños, usa símbolos de lote pequeño (forex en cuenta cent, p. ej. `EURUSDc`) y añádelos con `/addpair`. Subir `RISK_PER_TRADE_PCT` también lo desbloquea, pero cada operación perdida pesa más.
+
+---
+
 ## Panel web
 
 `http://localhost:8080`
@@ -64,6 +74,7 @@ python test_cent.py        # normalización de cuentas cent
 | `/trades` | Operaciones abiertas con P/L |
 | `/history` | Últimas operaciones cerradas |
 | `/risk` | Margen y riesgo de liquidación |
+| `/diagnostico` | Qué símbolos puede operar tu cuenta y por qué no |
 | `/login` | Conectar a Exness (MT5) |
 | `/pause` `/resume` `/stop` | Control del bot |
 | `/setstake` `/setmaxtrades` | Cambiar parámetros |
@@ -95,6 +106,33 @@ Levanta dos contenedores: la terminal MT5 bajo Wine (accesible por VNC en `http:
 
 ---
 
+## Estrategia `trend`: lo que ha funcionado en público
+
+Con `STRATEGY=trend` el bot usa **seguimiento de tendencia**, la familia de estrategias con más evidencia pública, auditada y fuera de muestra:
+
+| Caso público | Qué demostró | Cómo se aplica aquí |
+|---|---|---|
+| Tortugas de Dennis/Eckhardt (1983-88) | Rupturas de canal + tamaño por volatilidad + stop a 2N | Entrada por ruptura Donchian de 55 velas, stop inicial a 2×ATR, salida por canal de 20 |
+| Fondos CTA / managed futures (Winton, AQR, Man AHL) | Décadas de track record con reglas sistemáticas y simples | Pocas reglas, pocos parámetros, sin take profit fijo |
+| *Time Series Momentum* (Moskowitz, Ooi, Pedersen, 2012) y *A Century of Evidence on Trend-Following* (Hurst, Ooi, Pedersen, 2017) | El retorno pasado de un activo predice el siguiente | Filtro: solo largos si el momentum de 90 velas es positivo |
+| Liu & Tsyvinski (2021) | Momentum de series temporales también en cripto | Mismo filtro en BTC/ETH/etc. |
+| *Volatility-Managed Portfolios* (Moreira & Muir, 2017) | Reducir la exposición cuando sube la volatilidad mejora el Sharpe | Posición = riesgo fijo / distancia del stop (más volatilidad → posición más pequeña) |
+| Freqtrade (*protections*) | Cooldown y StoplossGuard evitan rachas de pérdidas en bucle | `COOLDOWN_MINUTES`, `STOPLOSS_GUARD_COUNT` |
+| Bailey & López de Prado, *The Deflated Sharpe Ratio* (2014) | La mayoría de backtests "ganadores" son suerte por probar muchas variantes | El backtest informa el nº de variantes y el Sharpe deflactado (DSR) |
+
+Qué esperar: un **win rate bajo (35-45 %)** es normal; gana con pocas operaciones grandes. Úsala en **1h o 4h**: en 5m las comisiones se comen la ventaja. En Exness abre largos y cortos, y el trailing cierra solo las posiciones abiertas por el bot (se identifican por su *magic number*).
+
+```bash
+python main.py download 1095     # 3 años de datos (incluye 1h y 4h)
+python trend_backtest.py 1h      # walk-forward: ajusta con el pasado, valida en el futuro
+python trend_backtest.py 4h --short
+python test_trend.py             # sin lookahead, sin ventaja en ruido, costes, tamaño, protecciones
+```
+
+El backtest ejecuta la señal en la apertura de la vela siguiente, cobra comisión y slippage, rellena los stops con hueco al peor precio y lo compara con buy & hold en el mismo periodo. **Activa `trend` con dinero real solo si el veredicto fuera de muestra es positivo con tus datos**, y después de semanas en `dry_run`.
+
+---
+
 ## Backtesting
 
 ```bash
@@ -117,7 +155,11 @@ src/
 ├── exness.py          Exness via MetaTrader 5
 ├── leverage_risk.py   Reglas de apalancamiento (con tests)
 ├── risk_manager.py    Gestión de riesgo spot
-├── strategy.py        Señales de entrada y salida
+├── strategy.py        Estrategia original (safe)
+├── trend_strategy.py  Seguimiento de tendencia (trend)
+├── trend_backtest.py  Backtest realista + walk-forward
+├── performance.py     Sharpe, Sortino, Calmar, PSR, DSR
+├── protections.py     Cooldown y StoplossGuard
 ├── indicators.py      EMA, RSI, MACD, ADX, Bollinger, ATR
 ├── backtester.py      Motor de backtesting
 ├── ml_engine.py       Modelo de ML opcional
