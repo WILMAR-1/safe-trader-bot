@@ -1,0 +1,82 @@
+# Imagen MT5 (Exness) corregida.
+#
+# La imagen base instala "mt5linux>=0.1.9", que hoy resuelve a la 1.0.11.
+# Esa version elimino la opcion "-w" que su propio script de arranque usa
+# en la linea:
+#   python3 -m mt5linux --host 0.0.0.0 -p 8001 -w $wine_executable python.exe
+# El resultado es "Error: Unknown switch -w" y el servidor NO arranca.
+#
+# Aqui fijamos mt5linux a 0.1.9 (la version que si acepta "-w") tanto en el
+# Python de Wine como en el de Linux.
+FROM gmag11/metatrader5_vnc:latest
+
+USER root
+
+RUN sed -i \
+    -e 's/"mt5linux>=0\.1\.9"/"mt5linux==0.1.9"/g' \
+    -e 's/--no-deps mt5linux/--no-deps "mt5linux==0.1.9"/g' \
+    /Metatrader/start.sh \
+ && grep -n 'mt5linux==0.1.9' /Metatrader/start.sh
+
+# --- TERMINAL CON MARCA EXNESS (arregla el "IPC timeout") ---
+# CAUSA RAIZ: la imagen base instala el mt5setup.exe GENERICO de MetaQuotes, que
+# NO trae la lista de servidores de ningun broker. Sin esa lista, config/servers.dat
+# nace vacio y mt5.initialize(server="Exness-MT5Real22") no puede resolver el
+# servidor: se bloquea hasta agotar el timeout -> (-10005 IPC timeout), y al no
+# completarse initialize() tampoco se abre el canal IPC -> (-10004).
+# El instalador de marca del broker es la MISMA terminal pero PRE-CONFIGURADA con
+# las direcciones de sus servidores, asi que funciona sin tocar nunca la interfaz.
+# Ojo: el instalador de Exness crea la carpeta "MetaTrader 5 EXNESS", no
+# "MetaTrader 5", asi que hay que ajustar tambien la ruta que busca el script.
+RUN sed -i \
+    -e 's#mt5setup_url="https://download.mql5.com/cdn/web/metaquotes.software.corp/mt5/mt5setup.exe"#mt5setup_url="https://download.mql5.com/cdn/web/exness.technologies.ltd/mt5/exness5setup.exe"#' \
+    -e "s#mt5file='/config/.wine/drive_c/Program Files/MetaTrader 5/terminal64.exe'#mt5file='/config/.wine/drive_c/Program Files/MetaTrader 5 EXNESS/terminal64.exe'#" \
+    /Metatrader/start.sh \
+ && grep -nE 'mt5setup_url=|mt5file=' /Metatrader/start.sh
+
+# --- Python 64 bits + MetaTrader5 actual ---
+# La imagen base instala Python 3.9 de 32 BITS y el paquete MetaTrader5==5.0.36
+# (de 2021). La terminal es terminal64.exe (64 bits, build 6074+), y esa mezcla
+# provoca "IPC timeout": el paquete no logra hablar con la terminal.
+# Aqui pasamos a Python 3.11 de 64 bits y al paquete MetaTrader5 sin fijar version.
+RUN sed -i \
+    -e 's#python_url="https://www.python.org/ftp/python/3\.9\.13/python-3\.9\.13\.exe"#python_url="https://www.python.org/ftp/python/3.11.9/python-3.11.9-amd64.exe"#' \
+    -e 's/MetaTrader5==\$metatrader_version/MetaTrader5/g' \
+    -e 's#Python39-32#Python311#g' \
+    /Metatrader/start.sh \
+ && grep -nE 'python_url=|MetaTrader5|Python311' /Metatrader/start.sh | head -12
+
+# El SERVIDOR mt5linux lo lanza el Python de Linux, asi que la version correcta
+# tiene que estar aqui (la imagen base trae la 1.0.11, que rompe el arranque).
+RUN pip install --break-system-packages --no-cache-dir --force-reinstall --no-deps \
+        "mt5linux==0.1.9" \
+ && pip install --break-system-packages --no-cache-dir "rpyc>=5.3.0" \
+ && pip show mt5linux 2>/dev/null | grep -i version
+
+# --- rpyc dentro de Wine (necesario para el servidor mt5linux) ---
+# Instalar mt5linux con dependencias en Wine falla: arrastra pypiwin32 -> cffi,
+# que necesita compilador de Visual C++ y revienta. Instalamos rpyc y plumbum
+# con --no-deps justo antes de arrancar el servidor.
+RUN sed -i \
+    's#show_message "\[7/7\] Starting the mt5linux server..."#$wine_executable python -m pip install --no-cache-dir --no-deps plumbum rpyc >/dev/null 2>\&1 \|\| true; show_message "[7/7] Starting the mt5linux server..."#' \
+    /Metatrader/start.sh \
+ && grep -n 'Starting the mt5linux server' /Metatrader/start.sh
+
+# --- Vigilante del servidor mt5linux ---
+# El servidor se cae de vez en cuando y el bot pierde la conexion
+# ("Connection refused"). Este bucle lo relanza automaticamente.
+RUN printf '%s\n' \
+    '' \
+    '# --- watchdog anadido: relanza el servidor mt5linux si se cae ---' \
+    'watchdog_mt5linux() {' \
+    '  while true; do' \
+    '    sleep 30' \
+    '    if ! pgrep -f "mt5linux --host" >/dev/null 2>&1; then' \
+    '      echo "[watchdog] servidor mt5linux caido - relanzando..."' \
+    '      python3 -m mt5linux --host 0.0.0.0 -p "$mt5server_port" -w "$wine_executable" python.exe &' \
+    '    fi' \
+    '  done' \
+    '}' \
+    'watchdog_mt5linux &' \
+    >> /Metatrader/start.sh \
+ && tail -12 /Metatrader/start.sh

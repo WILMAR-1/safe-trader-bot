@@ -1,0 +1,11 @@
+# Dependencias OPCIONALES para operar con Exness (MetaTrader 5).
+# Se instalan aparte para que un fallo aqui NO rompa el build del bot con Binance.
+#
+#   Linux / Docker : rpyc + mt5linux  (hablan con la terminal MT5 bajo Wine)
+#   Windows nativo : MetaTrader5      (pip install MetaTrader5)
+# Aqui va el CLIENTE (el bot). El SERVIDOR va fijado a 0.1.9 en Dockerfile.mt5
+# porque la 1.0.11 rompe el script de arranque de la imagen MT5.
+# El cliente usa la version actual: hablan por RPyC y son compatibles.
+# NO fijar 0.1.9 aqui: arrastra numpy==1.21.4, que no existe para Python 3.12.
+rpyc>=5.3.0
+mt5linux

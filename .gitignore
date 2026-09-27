@@ -1,0 +1,48 @@
+# ===================================================
+#  SECRETOS - NUNCA subir
+# ===================================================
+.env
+.env.local
+.env.*.local
+*.key
+*.pem
+credentials.json
+
+# ===================================================
+#  DATOS EN TIEMPO DE EJECUCION
+#  Contienen credenciales, historial de cuenta y
+#  datos de mercado pesados. Se regeneran solos.
+# ===================================================
+data/
+user_data/
+*.db
+*.sqlite
+*.log
+
+# ===================================================
+#  Python
+# ===================================================
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+dist/
+build/
+.venv/
+venv/
+env/
+.mypy_cache/
+.pytest_cache/
+.ruff_cache/
+
+# ===================================================
+#  Editores / SO
+# ===================================================
+.vscode/
+.idea/
+*.swp
+Thumbs.db
+.DS_Store
+
+# Ajustes locales de Claude Code (no compartir)
+.claude/settings.local.json

@@ -1,0 +1,70 @@
+services:
+  # ============================================================
+  #  Terminal MetaTrader 5 (Exness) bajo Wine + acceso por VNC
+  #  Solo arranca con el perfil "exness".
+  #
+  #  Si la imagen no existe o falla, cambiala con la variable
+  #  MT5_IMAGE en tu .env. Alternativas conocidas:
+  #    gmag11/metatrader5_vnc:latest
+  #    docker.io/gmag11/metatrader5-docker:latest
+  # ============================================================
+  mt5:
+    build:
+      context: .
+      dockerfile: Dockerfile.mt5
+    image: safe-trader-mt5:latest
+    container_name: safe-trader-mt5
+    profiles: ["exness"]
+    restart: unless-stopped
+    ports:
+      - "3000:3000"  # interfaz VNC en el navegador -> http://localhost:3000
+      - "8001:8001"  # servidor RPyC (mt5linux) que usa el bot
+    volumes:
+      # Volumen nativo de Docker (NO carpeta de Windows): Wine necesita permisos
+      # POSIX reales para instalar Mono/MT5. Un bind mount desde Windows falla.
+      - mt5_config:/config
+    environment:
+      - CUSTOM_USER=${MT5_VNC_USER:-trader}
+      - PASSWORD=${MT5_VNC_PASSWORD:-changeme}
+      - TZ=${TZ:-Europe/Madrid}
+    healthcheck:
+      test: ["CMD-SHELL", "nc -z localhost 3000 || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 120s
+
+  # ============================================================
+  #  El bot de trading + panel web
+  # ============================================================
+  safe-trader-bot:
+    build: .
+    image: safe-trader-bot:latest
+    container_name: safe-trader-bot
+    restart: unless-stopped
+    env_file:
+      - .env
+    volumes:
+      - ./data:/app/data
+    ports:
+      - "8080:8080"
+    environment:
+      - TZ=${TZ:-Europe/Madrid}
+      # Con BROKER=exness el bot habla con el contenedor mt5 por RPyC.
+      # Deja MT5_HOST vacio si usas Binance.
+      - MT5_HOST=${MT5_HOST:-}
+      - MT5_PORT=${MT5_PORT:-18812}
+    depends_on:
+      mt5:
+        condition: service_started
+        required: false
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+volumes:
+  # Configuracion y perfil de MetaTrader 5 (persiste entre reinicios).
+  # Al ser volumen nativo evita los problemas de permisos de Windows con Wine.
+  mt5_config:
