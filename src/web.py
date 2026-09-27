@@ -240,9 +240,14 @@ def api_events():
 def start_web(bot, host="0.0.0.0", port=8080):
     """Iniciar el servidor web en un hilo separado."""
     set_bot(bot)
-    thread = threading.Thread(
-        target=lambda: app.run(host=host, port=port, debug=False, use_reloader=False),
-        daemon=True,
-    )
+    def serve():
+        try:
+            # Servidor apto para produccion (el de Flask es solo para desarrollo)
+            from waitress import serve as waitress_serve
+            waitress_serve(app, host=host, port=port, threads=4, _quiet=True)
+        except ImportError:
+            app.run(host=host, port=port, debug=False, use_reloader=False)
+
+    thread = threading.Thread(target=serve, daemon=True)
     thread.start()
     logger.info("Dashboard web iniciado en http://localhost:%d", port)

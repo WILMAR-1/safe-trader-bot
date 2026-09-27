@@ -54,6 +54,8 @@ services:
       # Deja MT5_HOST vacio si usas Binance.
       - MT5_HOST=${MT5_HOST:-}
       - MT5_PORT=${MT5_PORT:-18812}
+    # Da tiempo a cerrar ordenadamente (guardar estado y avisar por Telegram)
+    stop_grace_period: 30s
     depends_on:
       mt5:
         condition: service_started

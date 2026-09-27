@@ -3,7 +3,6 @@ Motor principal del bot de trading.
 Coordina exchange, estrategia, riesgo, base de datos y notificaciones.
 """
 
-import time
 import signal
 import threading
 import logging
@@ -66,6 +65,10 @@ class TradingBot:
         self.db = Database(Config.DB_PATH)
         # Evita que un cierre manual desde Telegram se cruce con el ciclo de trading
         self.trade_lock = threading.RLock()
+        # Despierta el bucle principal al instante al detener (docker stop, Telegram, panel)
+        self._wake = threading.Event()
+        # Ultima vela cerrada evaluada por simbolo: cada vela se evalua para entrar UNA vez
+        self._evaluated_candle: dict[str, object] = {}
 
         # Telegram Commander (notificaciones + comandos remotos)
         if Config.TELEGRAM_ENABLED and Config.TELEGRAM_TOKEN and Config.TELEGRAM_CHAT_ID:
@@ -135,6 +138,7 @@ class TradingBot:
     def stop(self):
         """Detener el bot por completo (el loop termina)."""
         self.running = False
+        self._wake.set()
         self._notify_control("DETENIDO", "Bot detenido desde el panel")
         return {"running": False}
 
@@ -363,7 +367,10 @@ class TradingBot:
         from src.web import start_web
         start_web(self, host="0.0.0.0", port=8080)
 
-        interval = self._timeframe_to_seconds(Config.TIMEFRAME)
+        # Stops y trailing se vigilan cada CHECK_INTERVAL_SECONDS; las entradas se evaluan
+        # una sola vez por vela cerrada. Antes el bot dormia una vela entera (1 h en 1h).
+        interval = min(Config.CHECK_INTERVAL_SECONDS, self._timeframe_to_seconds(Config.TIMEFRAME))
+        logger.info("Revision cada %ds (velas de %s)", interval, Config.TIMEFRAME)
 
         while self.running:
             try:
@@ -382,10 +389,10 @@ class TradingBot:
             except Exception as e:
                 logger.error("Error en el loop principal: %s", e, exc_info=True)
                 self.notifier.notify_risk_alert(f"Error en el ciclo principal: {e}")
-                time.sleep(30)  # Esperar antes de reintentar
+                self._wake.wait(30)  # Esperar antes de reintentar
 
             # Esperar hasta la proxima vela
-            time.sleep(interval)
+            self._wake.wait(interval)
 
         self._shutdown()
 
@@ -460,7 +467,7 @@ class TradingBot:
                 if self.use_trend:
                     df = self.strategy.prepare(df)
                 df.dropna(inplace=True)
-                if len(df) < 2:
+                if len(df) < 2 or not self._is_new_candle(symbol, df):
                     continue
 
                 signal = (self.strategy.signal(df, allow_short=True) if self.use_trend
@@ -580,6 +587,17 @@ class TradingBot:
             out.append(row)
         return out
 
+    def _is_new_candle(self, symbol: str, df: pd.DataFrame) -> bool:
+        """True solo la primera vez que se ve la ultima vela cerrada de este simbolo.
+        Evita reentrar en la misma vela tras un stop al revisar cada minuto."""
+        if df is None or df.empty or "timestamp" not in df.columns:
+            return True
+        last = df["timestamp"].iloc[-1]
+        if self._evaluated_candle.get(symbol) == last:
+            return False
+        self._evaluated_candle[symbol] = last
+        return True
+
     @staticmethod
     def _closed_candles(df: pd.DataFrame) -> pd.DataFrame:
         """Quitar la ultima vela: sigue abierta y sus valores cambian hasta el cierre
@@ -639,6 +657,9 @@ class TradingBot:
                 # Obtener datos y calcular indicadores
                 df = self._get_dataframe(symbol)
                 if df is None or len(df) < (self.strategy.min_candles if self.use_trend else 200):
+                    continue
+
+                if not self._is_new_candle(symbol, df):
                     continue
 
                 # Evaluar estrategia
@@ -816,6 +837,7 @@ class TradingBot:
     def _handle_shutdown(self, signum, frame):
         logger.info("Senal de apagado recibida. Cerrando...")
         self.running = False
+        self._wake.set()
 
     def _shutdown(self):
         stats = self.risk_manager.get_stats()

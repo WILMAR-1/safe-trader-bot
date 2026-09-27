@@ -1,0 +1,19 @@
+# Nada de secretos ni datos pesados en el contexto de build
+.env
+.env.*
+!.env.example
+data/
+*.db
+*.log
+.git/
+.gitignore
+__pycache__/
+*.pyc
+.venv/
+venv/
+.vscode/
+.idea/
+.claude/
+Dockerfile*
+docker-compose*.yml
+*.ps1

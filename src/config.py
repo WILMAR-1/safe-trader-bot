@@ -47,6 +47,8 @@ class Config:
     STRATEGY = os.getenv("STRATEGY", "safe").lower()
     # Velas a pedir al exchange. EMA200 + indicadores consumen ~200, hacen falta de sobra.
     OHLCV_LIMIT = int(os.getenv("OHLCV_LIMIT", "500"))
+    # Cada cuanto se vigilan stops/trailing y posiciones (segundos)
+    CHECK_INTERVAL_SECONDS = int(os.getenv("CHECK_INTERVAL_SECONDS", "60"))
 
     # Parametros de TrendStrategy (ver src/trend_strategy.py)
     TREND_ENTRY_N = int(os.getenv("TREND_ENTRY_N", "55"))

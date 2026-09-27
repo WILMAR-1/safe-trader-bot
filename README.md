@@ -119,6 +119,25 @@ Levanta dos contenedores: la terminal MT5 bajo Wine (accesible por VNC en `http:
 
 > **Primer arranque:** MetaTrader exige iniciar sesión una vez desde su ventana gráfica. Entra por VNC, haz el login, y a partir de ahí el bot se conecta solo. `Dockerfile.mt5` instala la terminal *con marca del broker*, necesaria para que el canal IPC funcione.
 
+### Actualizar a una versión nueva
+
+```bash
+git pull
+docker compose build            # ejecuta TODAS las pruebas; si una falla, no se crea la imagen
+docker compose up -d            # con Exness: docker compose --profile exness up -d
+docker compose logs -f safe-trader-bot
+```
+
+Tus datos (`data/`: operaciones, ajustes de Telegram, mercados) están en un volumen y se conservan al actualizar. Revisa en `.env.example` si hay variables nuevas (`STRATEGY`, `CHECK_INTERVAL_SECONDS`, `TZ`…) y cópialas a tu `.env`.
+
+Qué garantiza la imagen:
+
+- **Pruebas en el build:** reglas de riesgo, estrategia y Telegram se prueban al construir. Una imagen rota no llega a producción.
+- **Versiones fijadas** en `constraints.txt`: lo que se probó es lo que se ejecuta.
+- **Vigilancia cada minuto** (`CHECK_INTERVAL_SECONDS=60`) de stops y trailing, aunque las velas sean de 1h. Cada vela cerrada se evalúa para entrar una sola vez.
+- **Apagado ordenado:** `docker compose stop` cierra al instante guardando el estado (antes esperaba a la vela siguiente y Docker lo mataba).
+- Panel web servido con **waitress** (servidor de producción), healthcheck, usuario no-root y logs rotados.
+
 ---
 
 ## Estrategia `trend`: lo que ha funcionado en público
