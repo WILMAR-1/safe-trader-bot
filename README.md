@@ -51,7 +51,7 @@ Casi siempre es el tamaño de la cuenta. Con 15 USD, arriesgar un 1% son 0,15 US
 
 - Cada señal rechazada llega por Telegram con el motivo (como mucho un aviso cada 6 h por símbolo).
 - `/diagnostico` (o `/diagnostico EURUSDc XAUUSDc`) indica, símbolo por símbolo, si tu cuenta puede operarlo, con cuántos lotes y qué riesgo.
-- Con saldos pequeños, usa símbolos de lote pequeño (forex en cuenta cent, p. ej. `EURUSDc`) y añádelos con `/addpair`. Subir `RISK_PER_TRADE_PCT` también lo desbloquea, pero cada operación perdida pesa más.
+- Con saldos pequeños, usa símbolos de lote pequeño (forex en cuenta cent, p. ej. `EURUSDc`) y añádelos desde **🩺 Diagnóstico** (botón ➕) o con `/addpair EURUSDc`. Subir `RISK_PER_TRADE_PCT` también lo desbloquea, pero cada operación perdida pesa más.
 
 ---
 
@@ -68,17 +68,32 @@ Casi siempre es el tamaño de la cuenta. Con 15 USD, arriesgar un 1% son 0,15 US
 
 ## Telegram
 
+Escribe `/start` y todo se maneja con **botones**:
+
+- **Menú principal** con estado, balance y accesos directos. Al navegar, la pantalla se actualiza en el mismo mensaje en vez de llenar el chat, y el botón fijo **📋 Menú** te devuelve siempre al inicio.
+- **💼 Posiciones** (Binance y Exness) con resultado en vivo, stop y un botón para **cerrar a mercado**, que pide confirmación.
+- **📜 Historial** paginado, **💰 Ganancias** (24 h, 7 días y por mercado) y **🛡 Riesgo** con las reglas activas.
+- **🩺 Diagnóstico** (Exness): explica símbolo por símbolo si tu cuenta puede operarlo y lo añade con un botón.
+- **⚙️ Ajustes** con botones +/−: inversión, máximo de posiciones y mercados. En Exness se valida el nombre exacto del símbolo (`eurusdc` → `EURUSDc`) y se sugieren nombres parecidos.
+- **🔔 Avisos** a tu gusto: operaciones, rechazos por riesgo, resumen diario, horario o ninguno, y modo sin sonido. Las alertas de riesgo suenan siempre.
+- **Detener** y **cerrar posición** siempre piden confirmación. Solo responde a tu `TELEGRAM_CHAT_ID`.
+
+Los comandos de texto siguen disponibles:
+
 | Comando | Qué hace |
 |---|---|
-| `/status` | Estado, balance, profit, win rate |
-| `/trades` | Operaciones abiertas con P/L |
-| `/history` | Últimas operaciones cerradas |
-| `/risk` | Margen y riesgo de liquidación |
-| `/diagnostico` | Qué símbolos puede operar tu cuenta y por qué no |
+| `/menu` `/estado` `/posiciones` `/historial` | Pantallas principales |
+| `/ganancias` `/riesgo` `/diagnostico [SÍMBOLOS]` | Resultados, límites, por qué no opera |
+| `/ajustes` `/avisos` `/mercados` | Configuración |
+| `/pausar` `/reanudar` `/detener` | Control del bot |
+| `/setstake 50` `/setmaxtrades 3` `/addpair SOL` `/removepair SOL` | Atajos |
 | `/login` | Conectar a Exness (MT5) |
-| `/pause` `/resume` `/stop` | Control del bot |
-| `/setstake` `/setmaxtrades` | Cambiar parámetros |
-| `/pairs` `/addpair` `/removepair` | Gestionar mercados |
+
+Los nombres antiguos en inglés (`/status`, `/trades`, `/risk`…) siguen funcionando.
+
+```bash
+python test_telegram.py   # recorre todas las pantallas y botones con una API de Telegram simulada
+```
 
 ---
 

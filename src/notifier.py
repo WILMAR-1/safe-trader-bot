@@ -40,7 +40,7 @@ class Notifier:
         except Exception as e:
             logger.error("Error enviando notificacion Telegram: %s", e)
 
-    def notify_trade_open(self, symbol: str, price: float, amount: float, stake: float):
+    def notify_trade_open(self, symbol: str, price: float, amount: float, stake: float, **_):
         self.send(
             f"*COMPRA* {symbol}\n"
             f"Precio: `{price:.4f}`\n"
@@ -49,7 +49,7 @@ class Notifier:
         )
 
     def notify_trade_close(self, symbol: str, price: float, profit: float,
-                           profit_pct: float, reason: str):
+                           profit_pct: float, reason: str, **_):
         emoji = "+" if profit >= 0 else ""
         self.send(
             f"*VENTA* {symbol} ({reason})\n"
@@ -70,3 +70,9 @@ class Notifier:
 
     def notify_risk_alert(self, message: str):
         self.send(f"*ALERTA DE RIESGO*\n{message}")
+
+    def __getattr__(self, name):
+        # Avisos que solo implementa TelegramCommander: sin Telegram no hacen nada
+        if name.startswith("notify_"):
+            return lambda *args, **kwargs: None
+        raise AttributeError(name)

@@ -218,6 +218,23 @@ class ExnessExchange:
             logger.error("Error listando simbolos: %s", e)
             return []
 
+    def resolve_symbol(self, text: str) -> str:
+        """Nombre exacto del simbolo en esta cuenta ('eurusdc' -> 'EURUSDc').
+        Lanza ValueError con sugerencias si no existe."""
+        import difflib
+        text = str(text).strip().replace("/", "")
+        if not self.connected:
+            return text
+        if self.mt5.symbol_info(text) is not None:
+            return text
+        names = [s.name for s in (self.mt5.symbols_get() or [])]
+        by_lower = {n.lower(): n for n in names}
+        if text.lower() in by_lower:
+            return by_lower[text.lower()]
+        close = difflib.get_close_matches(text.lower(), list(by_lower), n=3, cutoff=0.6)
+        hint = f" ¿Quisiste decir {', '.join(by_lower[c] for c in close)}?" if close else ""
+        raise ValueError(f"{text} no existe en tu cuenta de Exness.{hint}")
+
     def fetch_ticker(self, symbol: str) -> dict:
         if not self.connected:
             return {}

@@ -5,6 +5,7 @@ Coordina exchange, estrategia, riesgo, base de datos y notificaciones.
 
 import time
 import signal
+import threading
 import logging
 import pandas as pd
 from datetime import datetime, timedelta, timezone
@@ -63,6 +64,8 @@ class TradingBot:
             self.protections = None
         logger.info("Estrategia activa: %s", Config.STRATEGY)
         self.db = Database(Config.DB_PATH)
+        # Evita que un cierre manual desde Telegram se cruce con el ciclo de trading
+        self.trade_lock = threading.RLock()
 
         # Telegram Commander (notificaciones + comandos remotos)
         if Config.TELEGRAM_ENABLED and Config.TELEGRAM_TOKEN and Config.TELEGRAM_CHAT_ID:
@@ -157,7 +160,27 @@ class TradingBot:
         return n
 
     def set_pairs(self, pairs: list) -> list:
-        """Cambiar en que mercados opera el bot (en caliente)."""
+        """Cambiar en que mercados opera el bot (en caliente).
+        En Exness cambia EXNESS_SYMBOLS respetando el nombre exacto del broker
+        (p.ej. EURUSDc en cuentas cent); en Binance, PAIR_WHITELIST."""
+        if self.is_exness:
+            cleaned = []
+            for p in pairs:
+                p = str(p).strip()
+                if not p:
+                    continue
+                # Solo se valida lo nuevo: un simbolo antiguo invalido no debe bloquear cambios
+                if p not in Config.EXNESS_SYMBOLS and getattr(self, "exness_ready", False):
+                    p = self.exness.resolve_symbol(p)  # lanza ValueError si no existe
+                if p not in cleaned:
+                    cleaned.append(p)
+            if not cleaned:
+                raise ValueError("Debe haber al menos un mercado")
+            Config.EXNESS_SYMBOLS = cleaned
+            self._save_runtime()
+            self._notify_control("MERCADOS", ", ".join(cleaned))
+            return cleaned
+
         cleaned = []
         for p in pairs:
             p = str(p).strip().upper()
@@ -182,9 +205,84 @@ class TradingBot:
             "running": self.running,
             "stake_amount": Config.STAKE_AMOUNT,
             "max_open_trades": Config.MAX_OPEN_TRADES,
-            "pairs": Config.PAIR_WHITELIST,
+            "pairs": self.active_symbols(),
             "mode": "LIVE" if Config.is_live() else "DRY RUN",
         }
+
+    def active_symbols(self) -> list:
+        """Mercados que opera el bot con el broker activo."""
+        return list(Config.EXNESS_SYMBOLS if self.is_exness else Config.PAIR_WHITELIST)
+
+    def list_open_positions(self) -> list[dict]:
+        """Posiciones abiertas en un formato comun para Binance y Exness (para Telegram/panel)."""
+        out = []
+        if self.is_exness:
+            if not getattr(self, "exness_ready", False):
+                return out
+            f = getattr(self.exness, "cent_factor", 1.0) or 1.0
+            for p in self.exness.get_positions():
+                entry, cur = float(p["entry_price"]), float(p["current_price"])
+                sign = 1 if p["side"] == "buy" else -1
+                out.append({
+                    "id": str(p["ticket"]), "symbol": p["symbol"], "side": p["side"],
+                    "entry": entry, "current": cur, "size": p["lots"], "size_unit": "lotes",
+                    "pl_pct": (cur / entry - 1) * 100 * sign if entry else 0.0,
+                    "pl": float(p.get("profit", 0) or 0) / f,
+                    "since": p.get("time"), "stop": p.get("stop_loss") or None,
+                    "is_bot": p.get("magic") == self._bot_magic(),
+                })
+            return out
+        for t in self.db.get_open_trades():
+            try:
+                cur = float(self.exchange.fetch_ticker(t["symbol"])["last"])
+            except Exception:
+                cur = float(t["entry_price"])
+            out.append({
+                "id": str(t["id"]), "symbol": t["symbol"], "side": "buy",
+                "entry": t["entry_price"], "current": cur, "size": t["amount"], "size_unit": "",
+                "pl_pct": (cur / t["entry_price"] - 1) * 100,
+                "pl": (cur - t["entry_price"]) * t["amount"],
+                "since": t["entry_time"], "stop": None, "is_bot": True,
+            })
+        return out
+
+    @staticmethod
+    def _bot_magic():
+        from src.exness import BOT_MAGIC
+        return BOT_MAGIC
+
+    def close_position_manual(self, position_id: str) -> tuple[bool, str]:
+        """Cerrar una posicion a mercado a peticion del usuario (Telegram)."""
+        with self.trade_lock:
+            if self.is_exness:
+                if not getattr(self, "exness_ready", False):
+                    return False, "Exness no esta conectado"
+                pos = next((p for p in self.exness.get_positions()
+                            if str(p["ticket"]) == str(position_id)), None)
+                if not pos:
+                    return False, "Esa posicion ya no esta abierta"
+                result = self.exness.close_position(pos["ticket"])
+                if not result.get("ok"):
+                    return False, result.get("reason", "El broker rechazo el cierre")
+                if self.protections:
+                    self.protections.register_exit(pos["symbol"], is_stoploss=False)
+                f = getattr(self.exness, "cent_factor", 1.0) or 1.0
+                self.notifier.notify_trade_close(
+                    pos["symbol"], float(pos["current_price"]),
+                    float(pos.get("profit", 0) or 0) / f,
+                    (pos["current_price"] / pos["entry_price"] - 1) * 100 * (1 if pos["side"] == "buy" else -1),
+                    "MANUAL", entry_time=pos.get("time"))
+                return True, pos["symbol"]
+
+            trade = self.db.get_trade(int(position_id))
+            if not trade or trade.get("status") != "open":
+                return False, "Esa operacion ya no esta abierta"
+            price = float(self.exchange.fetch_ticker(trade["symbol"])["last"])
+            self._execute_sell(trade, price, "MANUAL")
+            after = self.db.get_trade(int(position_id))
+            if after and after.get("status") == "open":
+                return False, "El exchange no confirmo la venta (mira los logs)"
+            return True, trade["symbol"]
 
     def _notify_control(self, action: str, detail: str):
         """Registrar un cambio de control en el feed y Telegram."""
@@ -194,7 +292,7 @@ class TradingBot:
         except Exception:
             pass
         try:
-            self.notifier.send(f"*[CONTROL] {action}*\n{detail}")
+            self.notifier.notify_control(action, detail)
         except Exception:
             pass
 
@@ -209,6 +307,7 @@ class TradingBot:
                     "STAKE_AMOUNT": Config.STAKE_AMOUNT,
                     "MAX_OPEN_TRADES": Config.MAX_OPEN_TRADES,
                     "PAIR_WHITELIST": Config.PAIR_WHITELIST,
+                    "EXNESS_SYMBOLS": Config.EXNESS_SYMBOLS,
                 }, f)
         except Exception as e:
             logger.error("No se pudo guardar runtime config: %s", e)
@@ -228,6 +327,8 @@ class TradingBot:
                 Config.MAX_OPEN_TRADES = int(data["MAX_OPEN_TRADES"])
             if data.get("PAIR_WHITELIST"):
                 Config.PAIR_WHITELIST = list(data["PAIR_WHITELIST"])
+            if data.get("EXNESS_SYMBOLS"):
+                Config.EXNESS_SYMBOLS = list(data["EXNESS_SYMBOLS"])
             logger.info("Runtime config cargada: %d pares, stake %.2f, max %d",
                         len(Config.PAIR_WHITELIST), Config.STAKE_AMOUNT, Config.MAX_OPEN_TRADES)
         except Exception as e:
@@ -256,10 +357,7 @@ class TradingBot:
         logger.info("  Stoploss: %.1f%%", Config.STOPLOSS * 100)
         logger.info("=" * 60)
 
-        self.notifier.send(
-            f"*Bot iniciado* ({mode})\n"
-            f"Balance: `{self.risk_manager.initial_balance:.2f} {Config.STAKE_CURRENCY}`"
-        )
+        self.notifier.notify_startup()
 
         # Iniciar dashboard web
         from src.web import start_web
@@ -269,7 +367,8 @@ class TradingBot:
 
         while self.running:
             try:
-                self._tick()
+                with self.trade_lock:
+                    self._tick()
 
                 # Enviar stats cada hora
                 if datetime.now() - self.last_stats_time > timedelta(hours=1):
@@ -282,7 +381,7 @@ class TradingBot:
                 break
             except Exception as e:
                 logger.error("Error en el loop principal: %s", e, exc_info=True)
-                self.notifier.notify_risk_alert(f"Error: {e}")
+                self.notifier.notify_risk_alert(f"Error en el ciclo principal: {e}")
                 time.sleep(30)  # Esperar antes de reintentar
 
             # Esperar hasta la proxima vela
@@ -323,13 +422,7 @@ class TradingBot:
             cur = summary.get("currency", "USD")
             logger.info("CONECTADO a Exness | balance=%.2f %s", bal, cur)
             self.risk_manager.initial_balance = bal or self.risk_manager.initial_balance
-            self.notifier.send(
-                f"*Conectado a EXNESS*\n"
-                f"Cuenta: `{summary.get('login')}`\n"
-                f"Balance: `{bal:.2f} {cur}`\n"
-                f"Apalancamiento broker: `1:{summary.get('broker_leverage')}`\n"
-                f"Modo: `{'LIVE' if Config.is_live() else 'DRY RUN'}`"
-            )
+            self.notifier.notify_connected(summary)
 
         # 1. Vigilar riesgo de liquidacion en lo que ya esta abierto
         summary = self.exness.get_balance_summary()
@@ -396,13 +489,7 @@ class TradingBot:
                 result = self.exness.create_order(symbol, signal, sl, tp)
                 if result.get("ok"):
                     plan = result.get("plan", {})
-                    self.notifier.send(
-                        f"*{signal.upper()} {symbol}*\n"
-                        f"Lotes: `{plan.get('lots')}`\n"
-                        f"Riesgo: `{plan.get('risk_usd')} USD`\n"
-                        f"Apalancamiento: `{plan.get('effective_leverage')}x`\n"
-                        f"Stop: `{sl:.4f}` | TP: `{tp:.4f}`"
-                    )
+                    self.notifier.notify_exness_open(symbol, signal, plan, sl, tp)
                     try:
                         from src.web import push_event
                         push_event("buy" if signal == "buy" else "sell",
@@ -440,8 +527,13 @@ class TradingBot:
                 if result.get("ok"):
                     is_stop = reason.startswith("STOP")
                     self.protections.register_exit(pos["symbol"], is_stop)
-                    self.notifier.send(f"*CIERRE {pos['symbol']}*\nRazon: `{reason}`\n"
-                                       f"P/L: `{pos.get('profit', 0):.2f}`")
+                    f = getattr(self.exness, "cent_factor", 1.0) or 1.0
+                    sign = 1 if pos["side"] == "buy" else -1
+                    self.notifier.notify_trade_close(
+                        pos["symbol"], float(pos["current_price"]),
+                        float(pos.get("profit", 0) or 0) / f,
+                        (pos["current_price"] / pos["entry_price"] - 1) * 100 * sign,
+                        reason, entry_time=pos.get("time"))
                     logger.info("Cerrada %s (%s)", pos["symbol"], reason)
             except Exception as e:
                 logger.error("Error gestionando posicion %s: %s", pos.get("symbol"), e)
@@ -455,8 +547,7 @@ class TradingBot:
         if symbol in last and now - last[symbol] < timedelta(hours=6):
             return
         last[symbol] = now
-        self.notifier.send(f"*Senal {side.upper()} {symbol} RECHAZADA por riesgo*\n`{reason}`\n"
-                           f"Usa /diagnostico para ver que simbolos puede operar tu cuenta.")
+        self.notifier.notify_rejection(symbol, side, reason)
 
     def diagnose_exness(self, symbols: list | None = None) -> list[dict]:
         """Para cada simbolo: si la cuenta PUEDE operarlo con las reglas de riesgo actuales
@@ -643,7 +734,10 @@ class TradingBot:
             )
 
             self.risk_manager.register_trade_open()
-            self.notifier.notify_trade_open(symbol, order["price"], order["amount"], stake)
+            stop = None
+            if self.use_trend:
+                stop = self.strategy.initial_stop(order["price"], float(df.iloc[-1]["atr"]))
+            self.notifier.notify_trade_open(symbol, order["price"], order["amount"], stake, stop=stop)
             try:
                 from src.web import push_event
                 push_event("buy", {"symbol": symbol, "price": round(order["price"], 4), "stake": stake})
@@ -675,7 +769,8 @@ class TradingBot:
             if self.protections:
                 self.protections.register_exit(trade["symbol"], reason.startswith("STOP"))
             self.notifier.notify_trade_close(
-                trade["symbol"], order["price"], profit, profit_pct, reason
+                trade["symbol"], order["price"], profit, profit_pct, reason,
+                entry_time=trade.get("entry_time")
             )
             try:
                 from src.web import push_event
@@ -725,8 +820,6 @@ class TradingBot:
     def _shutdown(self):
         stats = self.risk_manager.get_stats()
         self.db.save_stats(stats)
-        self.notifier.notify_stats(stats)
-
         logger.info("=" * 60)
         logger.info("  Bot detenido")
         logger.info("  Balance final: %.2f %s", stats["balance"], Config.STAKE_CURRENCY)
@@ -736,7 +829,5 @@ class TradingBot:
                      stats["winning_trades"], stats["losing_trades"])
         logger.info("=" * 60)
 
-        self.notifier.send(
-            f"*Bot detenido*\nBalance: `{stats['balance']:.2f}`\nProfit: `{stats['profit_pct']:.1f}%`"
-        )
+        self.notifier.notify_shutdown(stats)
         self.db.close()
